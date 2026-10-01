@@ -1,14 +1,11 @@
 import { Buffer } from 'buffer';
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useState } from 'react';
 import {
-  ActivityIndicator,
   Alert,
   FlatList,
-  KeyboardAvoidingView,
   PermissionsAndroid,
   Platform,
   SafeAreaView,
-  ScrollView,
   StatusBar,
   StyleSheet,
   Text,
@@ -18,868 +15,1758 @@ import {
 } from 'react-native';
 import { BleManager, Device } from 'react-native-ble-plx';
 
+const manager = new BleManager();
+
+/* =========================================================
+   BLE CONFIG
+========================================================= */
+
 const SERVICE_UUID = 'aee04821-1973-4e1f-a590-e84b10d580e7';
 const CHAR_UUID = 'cde07b1a-889b-44b7-a99f-c888dddac729';
-
-const C = {
-  bg: '#EEE4D5',
-  paper: '#F8F0E5',
-  white: '#FFFDF8',
-  coral: '#EF5B57',
-  coralDark: '#D84D49',
-  charcoal: '#41413F',
-  dark: '#292927',
-  text: '#242422',
-  soft: '#68645E',
-  light: '#999087',
-  line: '#B8ADA0',
-  green: '#4D7A65',
-};
+const CHAR_UUID_NOTIFY = 'cde07b1a-889b-44b7-a99f-c888dddac729';
 
 export default function Index() {
-  const manager = useRef(new BleManager()).current;
-  const scanTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
-
   const [devices, setDevices] = useState<Device[]>([]);
-  const [device, setDevice] = useState<Device | null>(null);
-  const [preview, setPreview] = useState(false);
-  const [scanning, setScanning] = useState(false);
-  const [connecting, setConnecting] = useState(false);
-  const [reading, setReading] = useState(false);
-  const [writing, setWriting] = useState(false);
-  const [firstRead, setFirstRead] = useState(false);
-  const [written, setWritten] = useState(false);
-  const [finalRead, setFinalRead] = useState(false);
-  const [value, setValue] = useState('');
-  const [myName, setMyName] = useState('');
+  const [connectedDevice, setConnectedDevice] = useState<Device | null>(null);
+
+  const [receivedData, setReceivedData] = useState('');
+  const [yourName, setYourName] = useState('');
   const [buddyName, setBuddyName] = useState('');
 
-  useEffect(() => {
-    return () => {
-      if (scanTimer.current) clearTimeout(scanTimer.current);
-      manager.stopDeviceScan();
-      manager.destroy();
-    };
-  }, [manager]);
+  const [isScanning, setIsScanning] = useState(false);
+  const [isConnecting, setIsConnecting] = useState(false);
+  const [isReading, setIsReading] = useState(false);
+  const [isWriting, setIsWriting] = useState(false);
+
+  const [hasRead, setHasRead] = useState(false);
+  const [hasWritten, setHasWritten] = useState(false);
+  const [hasFinalRead, setHasFinalRead] = useState(false);
+
+  /* =========================================================
+     PERMISSIONS
+  ========================================================= */
 
   async function requestPermissions() {
-    if (Platform.OS !== 'android') return true;
-    try {
-      if (Number(Platform.Version) >= 31) {
-        const result = await PermissionsAndroid.requestMultiple([
+    manager.stopDeviceScan();
+
+    if (Platform.OS === 'android') {
+      if (Platform.Version >= 31) {
+        const granted = await PermissionsAndroid.requestMultiple([
           PermissionsAndroid.PERMISSIONS.BLUETOOTH_SCAN,
           PermissionsAndroid.PERMISSIONS.BLUETOOTH_CONNECT,
+          PermissionsAndroid.PERMISSIONS.ACCESS_FINE_LOCATION,
         ]);
+
         return (
-          result[PermissionsAndroid.PERMISSIONS.BLUETOOTH_SCAN] ===
+          granted['android.permission.BLUETOOTH_SCAN'] ===
             PermissionsAndroid.RESULTS.GRANTED &&
-          result[PermissionsAndroid.PERMISSIONS.BLUETOOTH_CONNECT] ===
+          granted['android.permission.BLUETOOTH_CONNECT'] ===
+            PermissionsAndroid.RESULTS.GRANTED &&
+          granted['android.permission.ACCESS_FINE_LOCATION'] ===
             PermissionsAndroid.RESULTS.GRANTED
         );
       }
-      return (
-        (await PermissionsAndroid.request(
-          PermissionsAndroid.PERMISSIONS.ACCESS_FINE_LOCATION
-        )) === PermissionsAndroid.RESULTS.GRANTED
+
+      const granted = await PermissionsAndroid.request(
+        PermissionsAndroid.PERMISSIONS.ACCESS_FINE_LOCATION
       );
-    } catch (e) {
-      console.log('Permission error:', e);
-      return false;
-    }
-  }
 
-  function resetActivity() {
-    setValue('');
-    setMyName('');
-    setBuddyName('');
-    setFirstRead(false);
-    setWritten(false);
-    setFinalRead(false);
-  }
-
-  async function startScan() {
-    if (!(await requestPermissions())) {
-      Alert.alert('Permission required', 'Please allow Bluetooth permissions.');
-      return;
+      return granted === PermissionsAndroid.RESULTS.GRANTED;
     }
 
-    manager.stopDeviceScan();
-    if (scanTimer.current) clearTimeout(scanTimer.current);
-    setDevices([]);
-    setScanning(true);
+    return true;
+  }
 
-    manager.startDeviceScan(null, null, (error, found) => {
-      if (error) {
-        console.log('Scan error:', error);
-        manager.stopDeviceScan();
-        setScanning(false);
-        Alert.alert('Scan failed', error.message);
-        return;
+  useEffect(() => {
+    requestPermissions().then((granted) => {
+      if (!granted) {
+        console.log('Bluetooth permissions not granted');
       }
-      if (!found || !(found.name || found.localName)) return;
-
-      setDevices(current =>
-        current.some(item => item.id === found.id)
-          ? current
-          : [...current, found]
-      );
     });
 
-    scanTimer.current = setTimeout(() => {
+    return () => {
       manager.stopDeviceScan();
-      setScanning(false);
-    }, 10000);
-  }
+    };
+  }, []);
 
-  async function connect(found: Device) {
-    try {
-      manager.stopDeviceScan();
-      setScanning(false);
-      setConnecting(true);
-      const connected = await manager.connectToDevice(found.id);
-      const ready = await connected.discoverAllServicesAndCharacteristics();
-      resetActivity();
-      setDevice(ready);
-    } catch (e: any) {
-      console.log('Connect error:', e);
-      Alert.alert('Connection failed', e?.message || 'Unable to connect.');
-    } finally {
-      setConnecting(false);
-    }
-  }
+  /* =========================================================
+     SCAN
+  ========================================================= */
 
-  async function read(isFinal = false) {
-    if (preview) {
-      setReading(true);
-      setTimeout(() => {
-        setValue(isFinal ? 'GRADE : A' : 'Hello from BLE device');
-        isFinal ? setFinalRead(true) : setFirstRead(true);
-        setReading(false);
-      }, 450);
+  const startScan = async () => {
+    const granted = await requestPermissions();
+
+    if (!granted) {
+      Alert.alert(
+        'Permission Required',
+        'Bluetooth permission is required to scan for BLE devices.'
+      );
       return;
     }
 
-    if (!device) return;
+    manager.stopDeviceScan();
+
+    setDevices([]);
+    setIsScanning(true);
+
+    manager.startDeviceScan(null, null, (error, device) => {
+      if (error) {
+        console.log('Scan error:', error);
+        setIsScanning(false);
+        return;
+      }
+
+      if (device && device.name) {
+        setDevices((previousDevices) => {
+          const exists = previousDevices.some((d) => d.id === device.id);
+
+          if (exists) {
+            return previousDevices;
+          }
+
+          return [...previousDevices, device];
+        });
+      }
+    });
+
+    setTimeout(() => {
+      manager.stopDeviceScan();
+      setIsScanning(false);
+    }, 8000);
+  };
+
+  /* =========================================================
+     CONNECT
+  ========================================================= */
+
+  const connectToDevice = async (device: Device) => {
+    manager.stopDeviceScan();
+
+    setIsScanning(false);
+    setIsConnecting(true);
+
     try {
-      setReading(true);
-      const characteristic = await manager.readCharacteristicForDevice(
-        device.id,
-        SERVICE_UUID,
-        CHAR_UUID
+      const connected = await manager.connectToDevice(device.id);
+
+      const discovered =
+        await connected.discoverAllServicesAndCharacteristics();
+
+      setConnectedDevice(discovered);
+
+      setReceivedData('');
+      setHasRead(false);
+      setHasWritten(false);
+      setHasFinalRead(false);
+
+      console.log('Connected to:', discovered.name);
+    } catch (error) {
+      console.log('Connection failed:', error);
+
+      Alert.alert(
+        'Connection Failed',
+        'Unable to connect to this BLE device.'
       );
-      const decoded = Buffer.from(
+    } finally {
+      setIsConnecting(false);
+    }
+  };
+
+  /* =========================================================
+     READ
+  ========================================================= */
+
+  const readCharacteristic = async (finalRead = false) => {
+    if (!connectedDevice) {
+      return;
+    }
+
+    setIsReading(true);
+
+    try {
+      const deviceId = connectedDevice.id.toString();
+
+      const characteristic =
+        await manager.readCharacteristicForDevice(
+          deviceId,
+          SERVICE_UUID,
+          CHAR_UUID
+        );
+
+      const rawData = Buffer.from(
         characteristic.value || '',
         'base64'
-      ).toString('utf8');
-      setValue(decoded || '(Empty value)');
-      isFinal ? setFinalRead(true) : setFirstRead(true);
-    } catch (e: any) {
-      console.log('Read error:', e);
-      Alert.alert('Read failed', e?.message || 'Unable to read value.');
+      ).toString('ascii');
+
+      setReceivedData(rawData);
+
+      if (finalRead) {
+        setHasFinalRead(true);
+      } else {
+        setHasRead(true);
+      }
+
+      console.log('Read Value:', rawData);
+    } catch (error) {
+      console.log('Read failed:', error);
+
+      Alert.alert(
+        'Read Failed',
+        'Unable to read the characteristic value.'
+      );
     } finally {
-      setReading(false);
+      setIsReading(false);
     }
-  }
+  };
 
-  async function write() {
-    if (!myName.trim() || !buddyName.trim()) {
-      Alert.alert('Names required', 'Please enter both names.');
+  /* =========================================================
+     WRITE
+  ========================================================= */
+
+  const writeCharacteristic = async () => {
+    if (!connectedDevice) {
       return;
     }
 
-    const message = `${myName.trim()}, ${buddyName.trim()}`;
-
-    if (preview) {
-      setWriting(true);
-      setTimeout(() => {
-        setWritten(true);
-        setFinalRead(false);
-        setValue('');
-        setWriting(false);
-        Alert.alert('Names sent', `${message}\n\nNow press Read again.`);
-      }, 450);
+    if (!yourName.trim() || !buddyName.trim()) {
+      Alert.alert(
+        'Names Required',
+        'Please enter both your name and your buddy’s name.'
+      );
       return;
     }
 
-    if (!device) return;
+    setIsWriting(true);
+
     try {
-      setWriting(true);
-      const encoded = Buffer.from(message, 'utf8').toString('base64');
+      /*
+        Change this line only if the teacher specifies
+        another format.
+
+        Current format:
+        Your Name, Buddy Name
+      */
+      const valueToWrite = `${yourName.trim()}, ${buddyName.trim()}`;
+
+      const base64Value = Buffer.from(
+        valueToWrite,
+        'utf-8'
+      ).toString('base64');
+
+      const deviceId = connectedDevice.id.toString();
+
       await manager.writeCharacteristicWithResponseForDevice(
-        device.id,
+        deviceId,
         SERVICE_UUID,
         CHAR_UUID,
-        encoded
+        base64Value
       );
-      setWritten(true);
-      setFinalRead(false);
-      setValue('');
-      Alert.alert('Names sent', 'Read again to receive the result.');
-    } catch (e: any) {
-      console.log('Write error:', e);
-      Alert.alert('Write failed', e?.message || 'Unable to write value.');
-    } finally {
-      setWriting(false);
-    }
-  }
 
-  async function leaveActivity() {
-    if (preview) {
-      setPreview(false);
-      resetActivity();
+      setHasWritten(true);
+      setHasFinalRead(false);
+      setReceivedData('');
+
+      Alert.alert(
+        'Names Sent',
+        `"${valueToWrite}" was written successfully.\n\nNow read again to reveal the result.`
+      );
+
+      console.log('Write Value:', valueToWrite);
+    } catch (error) {
+      console.log('Write failed:', error);
+
+      Alert.alert(
+        'Write Failed',
+        'Unable to write data to the BLE device.'
+      );
+    } finally {
+      setIsWriting(false);
+    }
+  };
+
+  /* =========================================================
+     NOTIFICATION
+  ========================================================= */
+
+  const startNotificationStream = () => {
+    if (!connectedDevice) {
       return;
     }
-    if (device) {
-      try {
-        await manager.cancelDeviceConnection(device.id);
-      } catch (e) {
-        console.log('Disconnect error:', e);
+
+    manager.monitorCharacteristicForDevice(
+      connectedDevice.id,
+      SERVICE_UUID,
+      CHAR_UUID_NOTIFY,
+      (error, char) => {
+        if (error) {
+          console.log('Notification error:', error);
+          return;
+        }
+
+        if (char?.value) {
+          const rawData = Buffer.from(
+            char.value,
+            'base64'
+          ).toString('ascii');
+
+          setReceivedData(rawData);
+        }
       }
+    );
+  };
+
+  /* =========================================================
+     DISCONNECT
+  ========================================================= */
+
+  const disconnectDevice = async () => {
+    if (!connectedDevice) {
+      return;
     }
-    setDevice(null);
-    resetActivity();
-  }
 
-  function openPreview() {
-    manager.stopDeviceScan();
-    setScanning(false);
-    resetActivity();
-    setPreview(true);
-  }
+    try {
+      await manager.cancelDeviceConnection(
+        connectedDevice.id
+      );
+    } catch (error) {
+      console.log('Disconnect error:', error);
+    }
 
-  if (!device && !preview) {
+    setConnectedDevice(null);
+    setReceivedData('');
+    setYourName('');
+    setBuddyName('');
+    setHasRead(false);
+    setHasWritten(false);
+    setHasFinalRead(false);
+
+    Alert.alert(
+      'Disconnected',
+      'The BLE device has been disconnected.'
+    );
+  };
+
+  /* =========================================================
+     SCAN SCREEN
+  ========================================================= */
+
+  const renderScanScreen = () => {
     return (
-      <SafeAreaView style={s.safe}>
-        <StatusBar barStyle="dark-content" backgroundColor={C.bg} />
-        <View style={s.screen}>
-          <Decor />
+      <View style={styles.screen}>
+        {/* Decorative background */}
+        <View style={styles.glowTop} />
+        <View style={styles.glowRight} />
+
+        <View style={styles.hero}>
+          <View style={styles.logo}>
+            <Text style={styles.logoIcon}>B</Text>
+          </View>
+
+          <View style={styles.heroText}>
+            <Text style={styles.eyebrow}>BLUETOOTH LOW ENERGY</Text>
+            <Text style={styles.appTitle}>
+              BLE Grade{'\n'}Checker
+            </Text>
+
+            <Text style={styles.subtitle}>
+              Connect. Send your names.{'\n'}
+              Reveal your result.
+            </Text>
+          </View>
+        </View>
+
+        {/* Status */}
+        <View style={styles.statusCard}>
+          <View style={styles.statusLeft}>
+            <View
+              style={[
+                styles.statusDot,
+                isScanning && styles.statusDotScanning,
+              ]}
+            />
+
+            <View>
+              <Text style={styles.statusLabel}>BLUETOOTH</Text>
+
+              <Text style={styles.statusText}>
+                {isScanning
+                  ? 'Searching for devices...'
+                  : 'Ready to discover'}
+              </Text>
+            </View>
+          </View>
+
+          <View style={styles.readyBadge}>
+            <Text style={styles.readyBadgeText}>
+              {isScanning ? 'SCANNING' : 'READY'}
+            </Text>
+          </View>
+        </View>
+
+        {/* Main panel */}
+        <View style={styles.mainPanel}>
+          <View style={styles.scanIllustration}>
+            <View style={styles.bluetoothCircle}>
+              <Text style={styles.bluetoothSymbol}>ᛒ</Text>
+            </View>
+
+            <View style={styles.signalOne} />
+            <View style={styles.signalTwo} />
+          </View>
+
+          <Text style={styles.panelTitle}>
+            Find your BLE device
+          </Text>
+
+          <Text style={styles.panelDescription}>
+            Scan for nearby Bluetooth devices and select
+            your teacher&apos;s device to begin.
+          </Text>
+
+          <TouchableOpacity
+            activeOpacity={0.85}
+            style={[
+              styles.primaryButton,
+              isScanning && styles.primaryButtonDisabled,
+            ]}
+            onPress={startScan}
+            disabled={isScanning}
+          >
+            <Text style={styles.primaryButtonIcon}>
+              {isScanning ? '•••' : '⌁'}
+            </Text>
+
+            <Text style={styles.primaryButtonText}>
+              {isScanning
+                ? 'SCANNING...'
+                : 'SCAN FOR DEVICES'}
+            </Text>
+          </TouchableOpacity>
+        </View>
+
+        {/* Devices */}
+        <View style={styles.deviceHeader}>
+          <View>
+            <Text style={styles.sectionEyebrow}>
+              DISCOVERED
+            </Text>
+
+            <Text style={styles.sectionTitle}>
+              Nearby Devices
+            </Text>
+          </View>
+
+          <View style={styles.counter}>
+            <Text style={styles.counterText}>
+              {devices.length}
+            </Text>
+          </View>
+        </View>
+
+        {devices.length === 0 ? (
+          <View style={styles.emptyCard}>
+            <View style={styles.emptyIcon}>
+              <Text style={styles.emptyIconText}>⌁</Text>
+            </View>
+
+            <Text style={styles.emptyTitle}>
+              No devices yet
+            </Text>
+
+            <Text style={styles.emptyDescription}>
+              Press Scan for Devices to search for nearby
+              Bluetooth Low Energy devices.
+            </Text>
+          </View>
+        ) : (
           <FlatList
             data={devices}
-            keyExtractor={item => item.id}
-            contentContainerStyle={s.content}
+            keyExtractor={(item) => item.id}
             showsVerticalScrollIndicator={false}
-            ListHeaderComponent={
-              <>
-                <View style={s.nav}>
-                  <View>
-                    <Text style={s.brand}>BLE Connect</Text>
-                    <Text style={s.brandSub}>READ / WRITE / CONNECT</Text>
-                  </View>
-                  <View style={s.menu}>
-                    <View style={s.menuLine} />
-                    <View style={s.menuLine} />
-                    <View style={[s.menuLine, { width: 11 }]} />
-                  </View>
-                </View>
-
-                <View style={s.hero}>
-                  <View style={s.heroCircle} />
-                  <View style={s.heroRing} />
-                  <Text style={s.heroNo}>01</Text>
-                  <Text style={s.eyebrow}>BLUETOOTH LOW ENERGY</Text>
-                  <Text style={s.heroTitle}>
-                    Ready to{'\n'}
-                    <Text style={s.coral}>connect?</Text>
-                  </Text>
-                  <Text style={s.heroText}>
-                    Find your instructor’s Bluetooth device and begin the activity.
-                  </Text>
-                  <Text style={s.heroArrow}>→</Text>
-                </View>
-
-                <View style={s.intro}>
-                  <Text style={s.smallNo}>01</Text>
-                  <View style={{ flex: 1 }}>
-                    <Text style={s.introTitle}>Connect to your{'\n'}BLE device.</Text>
-                    <Text style={s.body}>
-                      Search for a nearby Bluetooth Low Energy device provided by
-                      your instructor.
-                    </Text>
-                  </View>
-                </View>
-
-                <View style={s.status}>
-                  <View style={s.statusLeft}>
-                    <View style={[s.dot, scanning && { backgroundColor: C.coral }]} />
-                    <View>
-                      <Text style={s.statusTitle}>
-                        {scanning ? 'Searching' : 'Bluetooth ready'}
-                      </Text>
-                      <Text style={s.micro}>
-                        {scanning ? 'Looking for nearby devices' : 'Ready when you are'}
-                      </Text>
-                    </View>
-                  </View>
-                  <Text style={s.statusCode}>{scanning ? 'SCANNING' : 'READY'}</Text>
-                </View>
-
-                <TouchableOpacity
-                  style={[s.primary, scanning && { opacity: 0.65 }]}
-                  disabled={scanning}
-                  onPress={startScan}
-                >
-                  <Text style={s.primaryNo}>01</Text>
-                  <Text style={s.primaryText}>
-                    {scanning ? 'Searching devices' : 'Scan devices'}
-                  </Text>
-                  {scanning ? (
-                    <ActivityIndicator color={C.paper} />
-                  ) : (
-                    <Text style={s.primaryArrow}>→</Text>
-                  )}
-                </TouchableOpacity>
-
-                <TouchableOpacity style={s.preview} onPress={openPreview}>
-                  <Text style={s.previewText}>Preview activity</Text>
-                  <Text style={s.coral}>↗</Text>
-                </TouchableOpacity>
-
-                <View style={s.heading}>
-                  <View>
-                    <Text style={s.eyebrowCoral}>DISCOVER</Text>
-                    <Text style={s.headingTitle}>Nearby devices</Text>
-                  </View>
-                  <Text style={s.count}>
-                    {String(devices.length).padStart(2, '0')}
-                  </Text>
-                </View>
-
-                {!devices.length && (
-                  <View style={s.empty}>
-                    <View style={s.emptyCircle} />
-                    <View style={s.emptyRing} />
-                    <Text style={s.emptyTitle}>No devices yet.</Text>
-                    <Text style={s.body}>
-                      Start scanning to discover nearby Bluetooth Low Energy devices.
-                    </Text>
-                    <View style={s.accentLine} />
-                  </View>
-                )}
-              </>
-            }
+            contentContainerStyle={styles.deviceList}
             renderItem={({ item }) => (
               <TouchableOpacity
-                style={s.device}
-                disabled={connecting}
-                onPress={() => connect(item)}
+                activeOpacity={0.8}
+                style={styles.deviceCard}
+                onPress={() => connectToDevice(item)}
+                disabled={isConnecting}
               >
-                <View style={s.deviceIcon}>
-                  <Text style={s.deviceIconText}>B</Text>
-                </View>
-                <View style={{ flex: 1 }}>
-                  <Text style={s.deviceName} numberOfLines={1}>
-                    {item.name || item.localName || 'BLE Device'}
+                <View style={styles.deviceIcon}>
+                  <Text style={styles.deviceIconText}>
+                    B
                   </Text>
-                  <Text style={s.deviceId} numberOfLines={1}>{item.id}</Text>
                 </View>
-                <View style={{ alignItems: 'flex-end' }}>
-                  <Text style={s.micro}>{item.rssi ?? '--'} dBm</Text>
-                  <Text style={s.deviceArrow}>→</Text>
+
+                <View style={styles.deviceInfo}>
+                  <Text
+                    style={styles.deviceName}
+                    numberOfLines={1}
+                  >
+                    {item.name || 'BLE Device'}
+                  </Text>
+
+                  <Text
+                    style={styles.deviceId}
+                    numberOfLines={1}
+                  >
+                    {item.id}
+                  </Text>
+                </View>
+
+                <View style={styles.deviceRight}>
+                  {item.rssi !== null && (
+                    <Text style={styles.rssi}>
+                      {item.rssi} dBm
+                    </Text>
+                  )}
+
+                  <Text style={styles.chevron}>›</Text>
                 </View>
               </TouchableOpacity>
             )}
-            ListFooterComponent={<Text style={s.footer}>BLE CONNECT / 2026</Text>}
+          />
+        )}
+
+        {isConnecting && (
+          <View style={styles.connectingOverlay}>
+            <View style={styles.connectingBox}>
+              <Text style={styles.connectingDots}>•••</Text>
+
+              <Text style={styles.connectingTitle}>
+                Connecting
+              </Text>
+
+              <Text style={styles.connectingText}>
+                Please wait while we connect to the BLE
+                device.
+              </Text>
+            </View>
+          </View>
+        )}
+      </View>
+    );
+  };
+
+  /* =========================================================
+     CONNECTED SCREEN
+  ========================================================= */
+
+  const renderConnectedScreen = () => {
+    return (
+      <View style={styles.screen}>
+        <View style={styles.glowTop} />
+        <View style={styles.glowRight} />
+
+        {/* Header */}
+        <View style={styles.connectedHeader}>
+          <View>
+            <Text style={styles.eyebrow}>
+              BLE GRADE CHECKER
+            </Text>
+
+            <Text style={styles.connectedHeading}>
+              Device Connected
+            </Text>
+          </View>
+
+          <View style={styles.connectedBadge}>
+            <View style={styles.connectedDot} />
+            <Text style={styles.connectedBadgeText}>
+              LIVE
+            </Text>
+          </View>
+        </View>
+
+        {/* Device */}
+        <View style={styles.connectedDeviceCard}>
+          <View style={styles.connectedDeviceIcon}>
+            <Text style={styles.connectedDeviceIconText}>
+              B
+            </Text>
+          </View>
+
+          <View style={styles.connectedDeviceInfo}>
+            <Text style={styles.connectedLabel}>
+              CONNECTED TO
+            </Text>
+
+            <Text
+              style={styles.connectedDeviceName}
+              numberOfLines={1}
+            >
+              {connectedDevice?.name || 'BLE Device'}
+            </Text>
+
+            <Text
+              style={styles.connectedDeviceId}
+              numberOfLines={1}
+            >
+              {connectedDevice?.id}
+            </Text>
+          </View>
+        </View>
+
+        {/* Steps */}
+        <View style={styles.steps}>
+          <View style={styles.stepItem}>
+            <View
+              style={[
+                styles.stepCircle,
+                hasRead && styles.stepCircleDone,
+              ]}
+            >
+              <Text
+                style={[
+                  styles.stepNumber,
+                  hasRead && styles.stepNumberDone,
+                ]}
+              >
+                {hasRead ? '✓' : '1'}
+              </Text>
+            </View>
+
+            <Text style={styles.stepLabel}>READ</Text>
+          </View>
+
+          <View
+            style={[
+              styles.stepLine,
+              hasRead && styles.stepLineDone,
+            ]}
           />
 
-          {connecting && (
-            <View style={s.overlay}>
-              <View style={s.modal}>
-                <ActivityIndicator size="large" color={C.coral} />
-                <Text style={s.modalTitle}>Connecting</Text>
-                <Text style={s.body}>Establishing connection with your BLE device.</Text>
-              </View>
-            </View>
-          )}
-        </View>
-      </SafeAreaView>
-    );
-  }
-
-  return (
-    <SafeAreaView style={s.safe}>
-      <StatusBar barStyle="dark-content" backgroundColor={C.bg} />
-      <KeyboardAvoidingView
-        style={s.screen}
-        behavior={Platform.OS === 'ios' ? 'padding' : undefined}
-      >
-        <Decor />
-        <ScrollView
-          contentContainerStyle={s.activityContent}
-          keyboardShouldPersistTaps="handled"
-          showsVerticalScrollIndicator={false}
-        >
-          <View style={s.activityNav}>
-            <TouchableOpacity onPress={leaveActivity}>
-              <Text style={s.back}>←</Text>
-            </TouchableOpacity>
-            <View style={{ flex: 1, marginLeft: 14 }}>
-              <Text style={s.brandSub}>BLE CONNECT</Text>
-              <Text style={s.activityTitle}>Activity</Text>
-            </View>
-            <View style={s.live}>
-              <View style={[s.dot, preview && { backgroundColor: C.coral }]} />
-              <Text style={s.liveText}>{preview ? 'PREVIEW' : 'LIVE'}</Text>
-            </View>
-          </View>
-
-          <View style={s.connected}>
-            <Text style={s.eyebrowCoral}>CONNECTED DEVICE</Text>
-            <Text style={s.connectedName} numberOfLines={1}>
-              {preview ? 'Teacher BLE Device' : device?.name || 'BLE Device'}
-            </Text>
-            <Text style={s.deviceId} numberOfLines={1}>
-              {preview ? 'Preview connection' : device?.id}
-            </Text>
-          </View>
-
-          <StepHeader number="01" label="READ" />
-          <Text style={s.stepTitle}>Read the current{'\n'}device value.</Text>
-          <View style={s.darkCard}>
-            <View style={s.darkCircle} />
-            <Text style={s.darkLabel}>CHARACTERISTIC</Text>
-            <Text style={s.darkTitle}>Read from{'\n'}your device.</Text>
-            <Text style={s.darkBody}>
-              Request the current value stored in the BLE Characteristic.
-            </Text>
-
-            {firstRead && !written && (
-              <View style={s.readBox}>
-                <Text style={s.darkLabel}>RECEIVED</Text>
-                <Text style={s.readValue}>{value}</Text>
-              </View>
-            )}
-
-            <TouchableOpacity
-              style={s.darkAction}
-              disabled={reading}
-              onPress={() => read(false)}
+          <View style={styles.stepItem}>
+            <View
+              style={[
+                styles.stepCircle,
+                hasWritten && styles.stepCircleDone,
+              ]}
             >
-              <Text style={s.darkActionText}>
-                {reading ? 'Reading...' : 'Read value'}
+              <Text
+                style={[
+                  styles.stepNumber,
+                  hasWritten && styles.stepNumberDone,
+                ]}
+              >
+                {hasWritten ? '✓' : '2'}
               </Text>
-              {reading ? (
-                <ActivityIndicator color={C.coral} />
-              ) : (
-                <Text style={s.coralArrow}>→</Text>
-              )}
-            </TouchableOpacity>
+            </View>
+
+            <Text style={styles.stepLabel}>WRITE</Text>
           </View>
 
-          <StepHeader number="02" label="WRITE" />
-          <Text style={s.stepTitle}>Send your{'\n'}names.</Text>
-          <Text style={s.activityBody}>
-            Enter your name and your buddy’s name. Both names will be written to
-            the BLE Characteristic.
+          <View
+            style={[
+              styles.stepLine,
+              hasWritten && styles.stepLineDone,
+            ]}
+          />
+
+          <View style={styles.stepItem}>
+            <View
+              style={[
+                styles.stepCircle,
+                hasFinalRead && styles.stepCircleDone,
+              ]}
+            >
+              <Text
+                style={[
+                  styles.stepNumber,
+                  hasFinalRead && styles.stepNumberDone,
+                ]}
+              >
+                {hasFinalRead ? '✓' : '3'}
+              </Text>
+            </View>
+
+            <Text style={styles.stepLabel}>RESULT</Text>
+          </View>
+        </View>
+
+        {/* STEP 1 */}
+        <View style={styles.actionCard}>
+          <View style={styles.actionCardHeader}>
+            <View style={styles.numberBadge}>
+              <Text style={styles.numberBadgeText}>01</Text>
+            </View>
+
+            <View>
+              <Text style={styles.actionEyebrow}>
+                FIRST STEP
+              </Text>
+
+              <Text style={styles.actionTitle}>
+                Read from device
+              </Text>
+            </View>
+          </View>
+
+          <Text style={styles.actionDescription}>
+            Read the current characteristic value from the
+            teacher&apos;s BLE device.
           </Text>
 
-          <Field
-            letter="A"
-            label="YOUR NAME"
-            value={myName}
-            placeholder="Enter your name"
-            onChange={setMyName}
-          />
-          <Field
-            letter="B"
-            label="BUDDY’S NAME"
-            value={buddyName}
-            placeholder="Enter buddy's name"
-            onChange={setBuddyName}
-          />
-
-          <TouchableOpacity style={s.primary} disabled={writing} onPress={write}>
-            <Text style={s.primaryText}>
-              {writing ? 'Sending names' : 'Send names'}
-            </Text>
-            {writing ? (
-              <ActivityIndicator color={C.paper} />
-            ) : (
-              <Text style={s.primaryArrow}>→</Text>
-            )}
-          </TouchableOpacity>
-
-          <StepHeader number="03" label="RESULT" />
-          <View style={s.result}>
-            <View style={s.resultCircle} />
-            <Text style={s.resultLabel}>YOUR RESULT</Text>
-            <Text style={s.resultTitle}>Read{'\n'}again.</Text>
-
-            {finalRead && value ? (
-              <>
-                <Text style={s.resultResponse}>DEVICE RESPONSE</Text>
-                <Text style={s.resultValue}>{value}</Text>
-              </>
-            ) : (
-              <>
-                <Text style={s.waiting}>--</Text>
-                <Text style={s.resultDescription}>
-                  Send your names first, then read the Characteristic again to
-                  receive your result.
-                </Text>
-              </>
-            )}
-
-            <TouchableOpacity
-              disabled={!written || reading}
-              onPress={() => read(true)}
-              style={[s.resultButton, !written && { opacity: 0.35 }]}
-            >
-              <Text style={s.resultButtonText}>
-                {reading ? 'Reading...' : 'Read again'}
+          {!hasWritten && receivedData ? (
+            <View style={styles.valueBox}>
+              <Text style={styles.valueLabel}>
+                RECEIVED VALUE
               </Text>
-              {reading ? (
-                <ActivityIndicator color={C.coral} />
-              ) : (
-                <Text style={s.coralArrow}>→</Text>
-              )}
-            </TouchableOpacity>
-          </View>
 
-          <View style={s.config}>
-            <Text style={s.configTitle}>BLE CONFIGURATION</Text>
-            <Text style={s.configLabel}>SERVICE</Text>
-            <Text style={s.configValue}>{SERVICE_UUID}</Text>
-            <Text style={s.configLabel}>CHARACTERISTIC</Text>
-            <Text style={s.configValue}>{CHAR_UUID}</Text>
-          </View>
+              <Text style={styles.valueText}>
+                {receivedData}
+              </Text>
+            </View>
+          ) : null}
 
-          <TouchableOpacity style={s.exit} onPress={leaveActivity}>
-            <Text style={s.exitText}>{preview ? 'Exit preview' : 'Disconnect'}</Text>
-            <Text style={s.deviceArrow}>→</Text>
+          <TouchableOpacity
+            activeOpacity={0.85}
+            style={styles.secondaryButton}
+            onPress={() => readCharacteristic(false)}
+            disabled={isReading}
+          >
+            <Text style={styles.secondaryButtonText}>
+              {isReading ? 'READING...' : 'READ VALUE'}
+            </Text>
           </TouchableOpacity>
-          <Text style={s.footer}>BLE CONNECT / ACTIVITY</Text>
-        </ScrollView>
-      </KeyboardAvoidingView>
+        </View>
+
+        {/* STEP 2 */}
+        <View style={styles.actionCard}>
+          <View style={styles.actionCardHeader}>
+            <View style={styles.numberBadge}>
+              <Text style={styles.numberBadgeText}>02</Text>
+            </View>
+
+            <View>
+              <Text style={styles.actionEyebrow}>
+                SECOND STEP
+              </Text>
+
+              <Text style={styles.actionTitle}>
+                Send your names
+              </Text>
+            </View>
+          </View>
+
+          <Text style={styles.inputLabel}>
+            Your name
+          </Text>
+
+          <TextInput
+            style={styles.input}
+            value={yourName}
+            onChangeText={setYourName}
+            placeholder="Enter your name"
+            placeholderTextColor="#8290A8"
+          />
+
+          <Text style={styles.inputLabel}>
+            Buddy&apos;s name
+          </Text>
+
+          <TextInput
+            style={styles.input}
+            value={buddyName}
+            onChangeText={setBuddyName}
+            placeholder="Enter your buddy's name"
+            placeholderTextColor="#8290A8"
+          />
+
+          <TouchableOpacity
+            activeOpacity={0.85}
+            style={styles.primaryButton}
+            onPress={writeCharacteristic}
+            disabled={isWriting}
+          >
+            <Text style={styles.primaryButtonText}>
+              {isWriting ? 'SENDING...' : 'SEND NAMES'}
+            </Text>
+
+            <Text style={styles.buttonArrow}>→</Text>
+          </TouchableOpacity>
+        </View>
+
+        {/* STEP 3 */}
+        <View
+          style={[
+            styles.resultCard,
+            hasFinalRead && styles.resultCardActive,
+          ]}
+        >
+          <View style={styles.actionCardHeader}>
+            <View
+              style={[
+                styles.numberBadge,
+                hasFinalRead && styles.numberBadgeSuccess,
+              ]}
+            >
+              <Text
+                style={[
+                  styles.numberBadgeText,
+                  hasFinalRead &&
+                    styles.numberBadgeTextSuccess,
+                ]}
+              >
+                03
+              </Text>
+            </View>
+
+            <View>
+              <Text style={styles.actionEyebrow}>
+                FINAL STEP
+              </Text>
+
+              <Text style={styles.actionTitle}>
+                Reveal your result
+              </Text>
+            </View>
+          </View>
+
+          {hasFinalRead && receivedData ? (
+            <View style={styles.gradeBox}>
+              <Text style={styles.gradeLabel}>
+                DEVICE RESPONSE
+              </Text>
+
+              <Text style={styles.gradeValue}>
+                {receivedData}
+              </Text>
+
+              <Text style={styles.gradeCaption}>
+                Result received successfully
+              </Text>
+            </View>
+          ) : (
+            <View style={styles.lockedResult}>
+              <Text style={styles.lockedIcon}>◇</Text>
+
+              <Text style={styles.lockedTitle}>
+                Result waiting
+              </Text>
+
+              <Text style={styles.lockedText}>
+                Send your names, then read the
+                characteristic again.
+              </Text>
+            </View>
+          )}
+
+          <TouchableOpacity
+            activeOpacity={0.85}
+            style={[
+              styles.resultButton,
+              !hasWritten && styles.disabledButton,
+            ]}
+            disabled={!hasWritten || isReading}
+            onPress={() => readCharacteristic(true)}
+          >
+            <Text style={styles.resultButtonText}>
+              {isReading
+                ? 'READING...'
+                : 'READ AGAIN'}
+            </Text>
+          </TouchableOpacity>
+        </View>
+
+        {/* Disconnect */}
+        <TouchableOpacity
+          activeOpacity={0.75}
+          style={styles.disconnectButton}
+          onPress={disconnectDevice}
+        >
+          <Text style={styles.disconnectText}>
+            Disconnect Device
+          </Text>
+        </TouchableOpacity>
+
+        <Text style={styles.footerText}>
+          Bluetooth Low Energy • BLE Grade Checker
+        </Text>
+      </View>
+    );
+  };
+
+  /* =========================================================
+     MAIN
+  ========================================================= */
+
+  return (
+    <SafeAreaView style={styles.safeArea}>
+      <StatusBar
+        barStyle="light-content"
+        backgroundColor="#071A35"
+      />
+
+      <FlatList
+        data={[1]}
+        keyExtractor={() => 'main'}
+        renderItem={() =>
+          connectedDevice
+            ? renderConnectedScreen()
+            : renderScanScreen()
+        }
+        showsVerticalScrollIndicator={false}
+        contentContainerStyle={styles.scrollContent}
+      />
     </SafeAreaView>
   );
 }
 
-function StepHeader({ number, label }: { number: string; label: string }) {
-  return (
-    <View style={s.stepHeader}>
-      <Text style={s.stepNo}>{number}</Text>
-      <View style={s.stepLine} />
-      <Text style={s.stepLabel}>{label}</Text>
-    </View>
-  );
-}
+/* =========================================================
+   STYLES
+========================================================= */
 
-function Field({
-  letter,
-  label,
-  value,
-  placeholder,
-  onChange,
-}: {
-  letter: string;
-  label: string;
-  value: string;
-  placeholder: string;
-  onChange: (text: string) => void;
-}) {
-  return (
-    <View style={s.field}>
-      <Text style={s.fieldLetter}>{letter}</Text>
-      <View style={{ flex: 1 }}>
-        <Text style={s.inputLabel}>{label}</Text>
-        <TextInput
-          style={s.input}
-          value={value}
-          onChangeText={onChange}
-          placeholder={placeholder}
-          placeholderTextColor={C.light}
-          autoCapitalize="words"
-        />
-      </View>
-    </View>
-  );
-}
+const styles = StyleSheet.create({
+  safeArea: {
+    flex: 1,
+    backgroundColor: '#071A35',
+  },
 
-function Decor() {
-  return (
-    <View pointerEvents="none" style={StyleSheet.absoluteFill}>
-      <View style={s.bg} />
-      <View style={s.bgCircle} />
-      <View style={s.bgRing} />
-      <View style={s.bgLine} />
-    </View>
-  );
-}
+  scrollContent: {
+    flexGrow: 1,
+  },
 
-const s = StyleSheet.create({
-  safe: { flex: 1, backgroundColor: C.bg },
-  screen: { flex: 1, backgroundColor: C.bg },
-  bg: { ...StyleSheet.absoluteFillObject, backgroundColor: C.bg },
-  bgCircle: {
-    position: 'absolute', width: 190, height: 190, borderRadius: 95,
-    backgroundColor: C.coral, left: -125, top: -75, opacity: 0.85,
+  screen: {
+    flex: 1,
+    minHeight: 780,
+    paddingHorizontal: 20,
+    paddingTop: 30,
+    paddingBottom: 45,
+    backgroundColor: '#071A35',
+    overflow: 'hidden',
   },
-  bgRing: {
-    position: 'absolute', width: 160, height: 160, borderRadius: 80,
-    borderWidth: 1, borderColor: C.coral, right: -90, top: 150,
+
+  /* BACKGROUND */
+
+  glowTop: {
+    position: 'absolute',
+    width: 300,
+    height: 300,
+    borderRadius: 150,
+    backgroundColor: '#0C3470',
+    opacity: 0.35,
+    top: -170,
+    right: -80,
   },
-  bgLine: {
-    position: 'absolute', width: 240, height: 1, right: -80, top: 360,
-    backgroundColor: 'rgba(36,36,34,0.10)', transform: [{ rotate: '-28deg' }],
+
+  glowRight: {
+    position: 'absolute',
+    width: 260,
+    height: 260,
+    borderRadius: 130,
+    backgroundColor: '#075985',
+    opacity: 0.16,
+    top: 300,
+    right: -180,
   },
-  content: { paddingHorizontal: 24, paddingTop: 18, paddingBottom: 42 },
-  activityContent: { paddingHorizontal: 24, paddingTop: 18, paddingBottom: 50 },
-  nav: {
-    flexDirection: 'row', justifyContent: 'space-between',
-    alignItems: 'center', marginBottom: 24,
-  },
-  brand: { color: C.text, fontSize: 15, fontWeight: '800' },
-  brandSub: {
-    color: C.soft, fontSize: 7, fontWeight: '800',
-    letterSpacing: 1.3, marginTop: 2,
-  },
-  menu: { width: 32, alignItems: 'flex-end' },
-  menuLine: { width: 19, height: 1, backgroundColor: C.text, marginVertical: 2 },
+
+  /* HERO */
+
   hero: {
-    height: 335, backgroundColor: C.paper, padding: 25,
-    overflow: 'hidden', justifyContent: 'center',
-    shadowColor: '#6C6258', shadowOffset: { width: 0, height: 8 },
-    shadowOpacity: 0.15, shadowRadius: 12, elevation: 5,
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    marginTop: 10,
+    marginBottom: 28,
   },
-  heroCircle: {
-    position: 'absolute', width: 205, height: 205, borderRadius: 103,
-    backgroundColor: C.coral, right: -80, top: -55,
+
+  logo: {
+    width: 52,
+    height: 52,
+    borderRadius: 17,
+    backgroundColor: '#2563EB',
+    justifyContent: 'center',
+    alignItems: 'center',
+    marginRight: 15,
+
+    shadowColor: '#2563EB',
+    shadowOffset: {
+      width: 0,
+      height: 7,
+    },
+    shadowOpacity: 0.3,
+    shadowRadius: 12,
+    elevation: 8,
   },
-  heroRing: {
-    position: 'absolute', width: 145, height: 145, borderRadius: 73,
-    borderWidth: 1, borderColor: C.coral, right: -35, top: 92,
+
+  logoIcon: {
+    color: '#FFFFFF',
+    fontSize: 22,
+    fontWeight: '900',
   },
-  heroNo: {
-    position: 'absolute', right: -6, bottom: -28, color: 'rgba(65,65,63,0.08)',
-    fontSize: 120, fontWeight: '300',
-  },
-  eyebrow: {
-    color: C.text, fontSize: 7, fontWeight: '900',
-    letterSpacing: 1.5, marginBottom: 14,
-  },
-  eyebrowCoral: {
-    color: C.coral, fontSize: 7, fontWeight: '900', letterSpacing: 1.6,
-  },
-  heroTitle: {
-    color: C.text, fontSize: 39, lineHeight: 42,
-    fontWeight: '400', letterSpacing: -1.4,
-  },
-  coral: { color: C.coral, fontWeight: '700' },
+
   heroText: {
-    color: C.soft, fontSize: 10, lineHeight: 15,
-    maxWidth: 185, marginTop: 16,
+    flex: 1,
   },
-  heroArrow: {
-    position: 'absolute', right: 25, bottom: 20,
-    color: C.coral, fontSize: 42, fontWeight: '200',
+
+  eyebrow: {
+    color: '#64C7FF',
+    fontSize: 10,
+    letterSpacing: 2.2,
+    fontWeight: '800',
+    marginBottom: 6,
   },
-  intro: {
-    flexDirection: 'row', paddingVertical: 27,
-    borderBottomWidth: 1, borderBottomColor: C.line,
+
+  appTitle: {
+    color: '#FFFFFF',
+    fontSize: 34,
+    lineHeight: 37,
+    fontWeight: '900',
+    letterSpacing: -1.2,
   },
-  smallNo: { width: 50, color: C.coral, fontSize: 10, fontWeight: '900' },
-  introTitle: {
-    color: C.text, fontSize: 22, lineHeight: 25,
-    fontWeight: '500', letterSpacing: -0.5,
+
+  subtitle: {
+    color: '#9EB1CA',
+    fontSize: 13,
+    lineHeight: 20,
+    marginTop: 10,
   },
-  body: { color: C.soft, fontSize: 9, lineHeight: 14, marginTop: 8 },
-  status: {
-    minHeight: 72, flexDirection: 'row', alignItems: 'center',
-    justifyContent: 'space-between', borderBottomWidth: 1, borderBottomColor: C.line,
+
+  /* STATUS */
+
+  statusCard: {
+    backgroundColor: '#0D2647',
+    borderWidth: 1,
+    borderColor: '#173B68',
+    borderRadius: 18,
+    paddingVertical: 15,
+    paddingHorizontal: 16,
+    marginBottom: 16,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
   },
-  statusLeft: { flexDirection: 'row', alignItems: 'center' },
-  dot: {
-    width: 8, height: 8, borderRadius: 4,
-    backgroundColor: C.green, marginRight: 10,
+
+  statusLeft: {
+    flexDirection: 'row',
+    alignItems: 'center',
   },
-  statusTitle: { color: C.text, fontSize: 11, fontWeight: '800' },
-  micro: { color: C.light, fontSize: 8, marginTop: 3 },
-  statusCode: {
-    color: C.green, fontSize: 7, fontWeight: '900', letterSpacing: 1.1,
+
+  statusDot: {
+    width: 9,
+    height: 9,
+    borderRadius: 5,
+    backgroundColor: '#22C55E',
+    marginRight: 12,
   },
-  primary: {
-    minHeight: 62, backgroundColor: C.coral, flexDirection: 'row',
-    alignItems: 'center', paddingHorizontal: 17, marginTop: 20,
+
+  statusDotScanning: {
+    backgroundColor: '#38BDF8',
   },
-  primaryNo: { color: 'rgba(255,255,255,.65)', fontSize: 9, marginRight: 16 },
-  primaryText: { flex: 1, color: C.paper, fontSize: 13, fontWeight: '900' },
-  primaryArrow: { color: C.paper, fontSize: 30, fontWeight: '200' },
-  preview: {
-    alignSelf: 'flex-end', flexDirection: 'row',
-    alignItems: 'center', paddingVertical: 17, gap: 8,
+
+  statusLabel: {
+    color: '#6F8DB2',
+    fontSize: 9,
+    fontWeight: '800',
+    letterSpacing: 1.5,
   },
-  previewText: { color: C.soft, fontSize: 9 },
-  heading: {
-    flexDirection: 'row', alignItems: 'flex-end',
-    justifyContent: 'space-between', marginTop: 12, marginBottom: 16,
+
+  statusText: {
+    color: '#FFFFFF',
+    fontSize: 13,
+    fontWeight: '700',
+    marginTop: 3,
   },
-  headingTitle: {
-    color: C.text, fontSize: 25, fontWeight: '500',
-    letterSpacing: -0.7, marginTop: 4,
+
+  readyBadge: {
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    borderRadius: 8,
+    backgroundColor: '#123A66',
   },
-  count: { color: C.coral, fontSize: 32, fontWeight: '300' },
-  empty: {
-    minHeight: 220, backgroundColor: C.paper, padding: 24,
-    justifyContent: 'flex-end', overflow: 'hidden',
+
+  readyBadgeText: {
+    color: '#60CFFF',
+    fontSize: 9,
+    letterSpacing: 1,
+    fontWeight: '900',
   },
-  emptyCircle: {
-    position: 'absolute', width: 95, height: 95, borderRadius: 48,
-    backgroundColor: C.coral, right: -20, top: -20,
+
+  /* MAIN PANEL */
+
+  mainPanel: {
+    backgroundColor: '#FFFFFF',
+    borderRadius: 24,
+    paddingHorizontal: 20,
+    paddingVertical: 25,
+    alignItems: 'center',
+
+    shadowColor: '#000',
+    shadowOffset: {
+      width: 0,
+      height: 10,
+    },
+    shadowOpacity: 0.18,
+    shadowRadius: 20,
+    elevation: 8,
   },
-  emptyRing: {
-    position: 'absolute', width: 95, height: 95, borderRadius: 48,
-    borderWidth: 1, borderColor: C.charcoal, right: 28, top: 27,
+
+  scanIllustration: {
+    width: 90,
+    height: 80,
+    justifyContent: 'center',
+    alignItems: 'center',
+    marginBottom: 8,
   },
-  emptyTitle: { color: C.text, fontSize: 18, fontWeight: '600' },
-  accentLine: { width: 45, height: 2, backgroundColor: C.coral, marginTop: 15 },
-  device: {
-    minHeight: 82, flexDirection: 'row', alignItems: 'center',
-    borderTopWidth: 1, borderTopColor: C.line,
+
+  bluetoothCircle: {
+    width: 58,
+    height: 58,
+    borderRadius: 20,
+    backgroundColor: '#EAF3FF',
+    justifyContent: 'center',
+    alignItems: 'center',
   },
+
+  bluetoothSymbol: {
+    color: '#2563EB',
+    fontSize: 28,
+    fontWeight: '900',
+  },
+
+  signalOne: {
+    position: 'absolute',
+    width: 76,
+    height: 76,
+    borderWidth: 1,
+    borderColor: '#DCEAFF',
+    borderRadius: 38,
+  },
+
+  signalTwo: {
+    position: 'absolute',
+    width: 88,
+    height: 88,
+    borderWidth: 1,
+    borderColor: '#EEF5FF',
+    borderRadius: 44,
+  },
+
+  panelTitle: {
+    color: '#10213B',
+    fontSize: 21,
+    fontWeight: '900',
+    marginTop: 6,
+  },
+
+  panelDescription: {
+    color: '#687991',
+    textAlign: 'center',
+    fontSize: 12,
+    lineHeight: 19,
+    marginTop: 8,
+    maxWidth: 290,
+  },
+
+  primaryButton: {
+    width: '100%',
+    minHeight: 52,
+    borderRadius: 15,
+    backgroundColor: '#2563EB',
+    marginTop: 20,
+    paddingHorizontal: 18,
+    flexDirection: 'row',
+    justifyContent: 'center',
+    alignItems: 'center',
+
+    shadowColor: '#2563EB',
+    shadowOffset: {
+      width: 0,
+      height: 7,
+    },
+    shadowOpacity: 0.22,
+    shadowRadius: 10,
+    elevation: 5,
+  },
+
+  primaryButtonDisabled: {
+    backgroundColor: '#5677AE',
+  },
+
+  primaryButtonIcon: {
+    color: '#FFFFFF',
+    fontSize: 20,
+    fontWeight: '800',
+    marginRight: 8,
+  },
+
+  primaryButtonText: {
+    color: '#FFFFFF',
+    fontSize: 12,
+    letterSpacing: 0.8,
+    fontWeight: '900',
+  },
+
+  buttonArrow: {
+    position: 'absolute',
+    right: 20,
+    color: '#FFFFFF',
+    fontSize: 19,
+  },
+
+  /* DEVICES */
+
+  deviceHeader: {
+    marginTop: 26,
+    marginBottom: 12,
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'flex-end',
+  },
+
+  sectionEyebrow: {
+    color: '#5A789E',
+    fontSize: 9,
+    fontWeight: '900',
+    letterSpacing: 1.6,
+    marginBottom: 3,
+  },
+
+  sectionTitle: {
+    color: '#FFFFFF',
+    fontSize: 18,
+    fontWeight: '800',
+  },
+
+  counter: {
+    minWidth: 30,
+    height: 30,
+    paddingHorizontal: 9,
+    borderRadius: 10,
+    backgroundColor: '#12345E',
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+
+  counterText: {
+    color: '#65D4FF',
+    fontWeight: '900',
+    fontSize: 12,
+  },
+
+  emptyCard: {
+    minHeight: 155,
+    backgroundColor: '#0C2341',
+    borderWidth: 1,
+    borderColor: '#153A64',
+    borderRadius: 20,
+    justifyContent: 'center',
+    alignItems: 'center',
+    padding: 20,
+  },
+
+  emptyIcon: {
+    width: 43,
+    height: 43,
+    borderRadius: 14,
+    backgroundColor: '#12355E',
+    justifyContent: 'center',
+    alignItems: 'center',
+    marginBottom: 10,
+  },
+
+  emptyIconText: {
+    color: '#58C8FF',
+    fontSize: 23,
+  },
+
+  emptyTitle: {
+    color: '#FFFFFF',
+    fontSize: 14,
+    fontWeight: '800',
+  },
+
+  emptyDescription: {
+    color: '#7289A7',
+    textAlign: 'center',
+    fontSize: 11,
+    lineHeight: 17,
+    marginTop: 6,
+  },
+
+  deviceList: {
+    gap: 10,
+  },
+
+  deviceCard: {
+    minHeight: 76,
+    borderRadius: 18,
+    backgroundColor: '#FFFFFF',
+    paddingHorizontal: 14,
+    paddingVertical: 12,
+    flexDirection: 'row',
+    alignItems: 'center',
+  },
+
   deviceIcon: {
-    width: 42, height: 42, borderRadius: 21, backgroundColor: C.charcoal,
-    alignItems: 'center', justifyContent: 'center', marginRight: 13,
+    width: 44,
+    height: 44,
+    borderRadius: 14,
+    backgroundColor: '#E9F2FF',
+    justifyContent: 'center',
+    alignItems: 'center',
+    marginRight: 12,
   },
-  deviceIconText: { color: C.paper, fontSize: 12, fontWeight: '800' },
-  deviceName: { color: C.text, fontSize: 12, fontWeight: '800' },
-  deviceId: { color: C.light, fontSize: 7, marginTop: 4 },
-  deviceArrow: { color: C.coral, fontSize: 25, fontWeight: '300' },
-  footer: {
-    color: C.light, fontSize: 7, letterSpacing: 1.2,
-    borderTopWidth: 1, borderTopColor: C.line, paddingTop: 16, marginTop: 24,
+
+  deviceIconText: {
+    color: '#2563EB',
+    fontSize: 17,
+    fontWeight: '900',
   },
-  overlay: {
-    ...StyleSheet.absoluteFillObject, backgroundColor: 'rgba(41,41,39,.5)',
-    alignItems: 'center', justifyContent: 'center', padding: 28,
+
+  deviceInfo: {
+    flex: 1,
   },
-  modal: { width: '100%', backgroundColor: C.paper, padding: 30, alignItems: 'center' },
-  modalTitle: { color: C.text, fontSize: 23, fontWeight: '600', marginTop: 16 },
-  activityNav: { flexDirection: 'row', alignItems: 'center', marginBottom: 28 },
-  back: { color: C.text, fontSize: 27, fontWeight: '300' },
-  activityTitle: { color: C.text, fontSize: 13, fontWeight: '800', marginTop: 2 },
-  live: { flexDirection: 'row', alignItems: 'center' },
-  liveText: { color: C.soft, fontSize: 7, fontWeight: '900', letterSpacing: 1 },
-  connected: {
-    borderTopWidth: 1, borderBottomWidth: 1, borderColor: C.line,
-    paddingVertical: 18, marginBottom: 25,
+
+  deviceName: {
+    color: '#12213A',
+    fontSize: 14,
+    fontWeight: '800',
   },
-  connectedName: {
-    color: C.text, fontSize: 23, fontWeight: '600',
-    letterSpacing: -0.6, marginTop: 7,
+
+  deviceId: {
+    color: '#8A97A9',
+    fontSize: 9,
+    marginTop: 5,
   },
-  stepHeader: {
-    flexDirection: 'row', alignItems: 'center',
-    marginTop: 28, marginBottom: 13,
+
+  deviceRight: {
+    alignItems: 'flex-end',
+    marginLeft: 10,
   },
-  stepNo: { color: C.coral, fontSize: 31, fontWeight: '300' },
-  stepLine: { flex: 1, height: 1, backgroundColor: C.line, marginHorizontal: 13 },
+
+  rssi: {
+    color: '#60738D',
+    fontSize: 10,
+  },
+
+  chevron: {
+    color: '#2563EB',
+    fontSize: 24,
+    lineHeight: 25,
+  },
+
+  /* CONNECTING */
+
+  connectingOverlay: {
+    ...StyleSheet.absoluteFillObject,
+    backgroundColor: 'rgba(4,15,32,0.82)',
+    justifyContent: 'center',
+    alignItems: 'center',
+    padding: 30,
+  },
+
+  connectingBox: {
+    width: '100%',
+    backgroundColor: '#FFFFFF',
+    borderRadius: 25,
+    padding: 28,
+    alignItems: 'center',
+  },
+
+  connectingDots: {
+    color: '#2563EB',
+    fontSize: 28,
+    letterSpacing: 5,
+  },
+
+  connectingTitle: {
+    color: '#10213B',
+    fontSize: 20,
+    fontWeight: '900',
+    marginTop: 5,
+  },
+
+  connectingText: {
+    color: '#75849A',
+    fontSize: 12,
+    lineHeight: 18,
+    textAlign: 'center',
+    marginTop: 7,
+  },
+
+  /* CONNECTED HEADER */
+
+  connectedHeader: {
+    marginTop: 10,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+  },
+
+  connectedHeading: {
+    color: '#FFFFFF',
+    fontSize: 27,
+    fontWeight: '900',
+  },
+
+  connectedBadge: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#0C3C46',
+    borderRadius: 12,
+    paddingHorizontal: 11,
+    paddingVertical: 8,
+  },
+
+  connectedDot: {
+    width: 7,
+    height: 7,
+    borderRadius: 4,
+    backgroundColor: '#34D399',
+    marginRight: 6,
+  },
+
+  connectedBadgeText: {
+    color: '#6EE7B7',
+    fontSize: 9,
+    letterSpacing: 1,
+    fontWeight: '900',
+  },
+
+  /* CONNECTED DEVICE */
+
+  connectedDeviceCard: {
+    backgroundColor: '#0D2647',
+    borderWidth: 1,
+    borderColor: '#173B68',
+    borderRadius: 20,
+    padding: 15,
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginTop: 20,
+  },
+
+  connectedDeviceIcon: {
+    width: 48,
+    height: 48,
+    borderRadius: 15,
+    backgroundColor: '#2563EB',
+    justifyContent: 'center',
+    alignItems: 'center',
+    marginRight: 13,
+  },
+
+  connectedDeviceIconText: {
+    color: '#FFFFFF',
+    fontSize: 19,
+    fontWeight: '900',
+  },
+
+  connectedDeviceInfo: {
+    flex: 1,
+  },
+
+  connectedLabel: {
+    color: '#61C8FF',
+    fontSize: 8,
+    letterSpacing: 1.4,
+    fontWeight: '900',
+  },
+
+  connectedDeviceName: {
+    color: '#FFFFFF',
+    fontSize: 15,
+    fontWeight: '800',
+    marginTop: 3,
+  },
+
+  connectedDeviceId: {
+    color: '#7790AD',
+    fontSize: 9,
+    marginTop: 4,
+  },
+
+  /* STEPS */
+
+  steps: {
+    marginVertical: 25,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+
+  stepItem: {
+    alignItems: 'center',
+  },
+
+  stepCircle: {
+    width: 35,
+    height: 35,
+    borderRadius: 18,
+    borderWidth: 2,
+    borderColor: '#315276',
+    backgroundColor: '#0B213E',
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+
+  stepCircleDone: {
+    borderColor: '#38BDF8',
+    backgroundColor: '#0C4A6E',
+  },
+
+  stepNumber: {
+    color: '#6E89A8',
+    fontSize: 12,
+    fontWeight: '900',
+  },
+
+  stepNumberDone: {
+    color: '#7DD3FC',
+  },
+
   stepLabel: {
-    color: C.soft, fontSize: 7, fontWeight: '900', letterSpacing: 1.3,
+    color: '#7187A2',
+    fontSize: 8,
+    letterSpacing: 1,
+    fontWeight: '900',
+    marginTop: 6,
   },
-  stepTitle: {
-    color: C.text, fontSize: 29, lineHeight: 32,
-    fontWeight: '500', letterSpacing: -0.8, marginBottom: 18,
+
+  stepLine: {
+    width: 50,
+    height: 2,
+    backgroundColor: '#244464',
+    marginHorizontal: 7,
+    marginBottom: 19,
   },
-  activityBody: {
-    color: C.soft, fontSize: 10, lineHeight: 16,
-    maxWidth: 285, marginBottom: 20,
+
+  stepLineDone: {
+    backgroundColor: '#38BDF8',
   },
-  darkCard: {
-    backgroundColor: C.charcoal, minHeight: 300,
-    padding: 24, overflow: 'hidden',
+
+  /* ACTION CARDS */
+
+  actionCard: {
+    backgroundColor: '#FFFFFF',
+    borderRadius: 22,
+    padding: 18,
+    marginBottom: 14,
   },
-  darkCircle: {
-    position: 'absolute', width: 170, height: 170, borderRadius: 85,
-    backgroundColor: C.dark, right: -70, top: -60,
+
+  actionCardHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
   },
-  darkLabel: {
-    color: C.coral, fontSize: 7, fontWeight: '900', letterSpacing: 1.5,
+
+  numberBadge: {
+    width: 43,
+    height: 43,
+    borderRadius: 13,
+    backgroundColor: '#EAF2FF',
+    justifyContent: 'center',
+    alignItems: 'center',
+    marginRight: 12,
   },
-  darkTitle: {
-    color: C.paper, fontSize: 28, lineHeight: 31,
-    fontWeight: '500', marginTop: 12,
+
+  numberBadgeText: {
+    color: '#2563EB',
+    fontSize: 12,
+    fontWeight: '900',
   },
-  darkBody: {
-    color: '#C9C1B8', fontSize: 9, lineHeight: 14,
-    maxWidth: 220, marginTop: 10,
+
+  numberBadgeSuccess: {
+    backgroundColor: '#DCFCE7',
   },
-  readBox: {
-    borderTopWidth: 1, borderTopColor: '#696965',
-    marginTop: 20, paddingTop: 14,
+
+  numberBadgeTextSuccess: {
+    color: '#16A34A',
   },
-  readValue: { color: C.paper, fontSize: 14, fontWeight: '700', marginTop: 6 },
-  darkAction: {
-    marginTop: 22, minHeight: 50, borderTopWidth: 1,
-    borderTopColor: '#696965', flexDirection: 'row',
-    alignItems: 'center', justifyContent: 'space-between',
+
+  actionEyebrow: {
+    color: '#8A9AB0',
+    fontSize: 8,
+    fontWeight: '900',
+    letterSpacing: 1.3,
   },
-  darkActionText: { color: C.paper, fontSize: 11, fontWeight: '800' },
-  coralArrow: { color: C.coral, fontSize: 28 },
-  field: {
-    flexDirection: 'row', borderTopWidth: 1,
-    borderTopColor: C.line, paddingVertical: 16,
+
+  actionTitle: {
+    color: '#10213B',
+    fontSize: 17,
+    fontWeight: '900',
+    marginTop: 2,
   },
-  fieldLetter: { width: 42, color: C.coral, fontSize: 10, fontWeight: '900' },
+
+  actionDescription: {
+    color: '#748399',
+    fontSize: 11,
+    lineHeight: 17,
+    marginTop: 14,
+  },
+
+  secondaryButton: {
+    minHeight: 49,
+    borderRadius: 14,
+    backgroundColor: '#EAF2FF',
+    justifyContent: 'center',
+    alignItems: 'center',
+    marginTop: 15,
+  },
+
+  secondaryButtonText: {
+    color: '#1D5FD2',
+    fontSize: 11,
+    letterSpacing: 0.7,
+    fontWeight: '900',
+  },
+
+  valueBox: {
+    backgroundColor: '#F4F8FD',
+    borderRadius: 14,
+    padding: 14,
+    marginTop: 15,
+  },
+
+  valueLabel: {
+    color: '#8A9BB1',
+    fontSize: 8,
+    letterSpacing: 1.3,
+    fontWeight: '900',
+  },
+
+  valueText: {
+    color: '#12213A',
+    fontSize: 18,
+    fontWeight: '900',
+    marginTop: 5,
+  },
+
+  /* INPUT */
+
   inputLabel: {
-    color: C.soft, fontSize: 7, fontWeight: '900',
-    letterSpacing: 1.2, marginBottom: 7,
+    color: '#45566E',
+    fontSize: 11,
+    fontWeight: '800',
+    marginTop: 16,
+    marginBottom: 7,
   },
+
   input: {
-    color: C.text, fontSize: 15, paddingVertical: 7,
-    borderBottomWidth: 1, borderBottomColor: C.text,
+    height: 50,
+    borderRadius: 14,
+    backgroundColor: '#F4F7FB',
+    borderWidth: 1,
+    borderColor: '#DDE6F1',
+    paddingHorizontal: 15,
+    color: '#10213B',
+    fontSize: 13,
   },
-  result: {
-    backgroundColor: C.paper, minHeight: 330,
-    padding: 24, overflow: 'hidden',
+
+  /* RESULT */
+
+  resultCard: {
+    backgroundColor: '#FFFFFF',
+    borderRadius: 22,
+    padding: 18,
+    marginBottom: 14,
   },
-  resultCircle: {
-    position: 'absolute', width: 180, height: 180,
-    borderRadius: 90, backgroundColor: C.coral,
-    right: -105, top: -80, opacity: 0.9,
+
+  resultCardActive: {
+    borderWidth: 2,
+    borderColor: '#38BDF8',
   },
-  resultLabel: {
-    color: C.coral, fontSize: 7, fontWeight: '900', letterSpacing: 1.5,
+
+  lockedResult: {
+    alignItems: 'center',
+    backgroundColor: '#F6F8FB',
+    borderRadius: 17,
+    padding: 18,
+    marginTop: 16,
   },
-  resultTitle: {
-    color: C.text, fontSize: 31, lineHeight: 33,
-    fontWeight: '500', marginTop: 12,
+
+  lockedIcon: {
+    color: '#8DA1B9',
+    fontSize: 25,
   },
-  resultResponse: {
-    color: C.soft, fontSize: 7, fontWeight: '900',
-    letterSpacing: 1.2, marginTop: 24,
+
+  lockedTitle: {
+    color: '#43546A',
+    fontSize: 13,
+    fontWeight: '800',
+    marginTop: 5,
   },
-  resultValue: {
-    color: C.text, fontSize: 24, fontWeight: '800',
-    marginTop: 6, marginBottom: 12,
+
+  lockedText: {
+    color: '#8A99AB',
+    fontSize: 10,
+    lineHeight: 16,
+    textAlign: 'center',
+    marginTop: 5,
   },
-  waiting: {
-    color: C.coral, fontSize: 48, fontWeight: '300', marginTop: 14,
+
+  gradeBox: {
+    backgroundColor: '#071A35',
+    borderRadius: 18,
+    paddingVertical: 23,
+    paddingHorizontal: 15,
+    marginTop: 16,
+    alignItems: 'center',
   },
-  resultDescription: {
-    color: C.soft, fontSize: 9, lineHeight: 14, maxWidth: 225,
+
+  gradeLabel: {
+    color: '#6DA5CE',
+    fontSize: 8,
+    letterSpacing: 1.7,
+    fontWeight: '900',
   },
+
+  gradeValue: {
+    color: '#7DD3FC',
+    fontSize: 35,
+    lineHeight: 44,
+    fontWeight: '900',
+    textAlign: 'center',
+    marginTop: 5,
+  },
+
+  gradeCaption: {
+    color: '#7790AD',
+    fontSize: 10,
+    marginTop: 3,
+  },
+
   resultButton: {
-    minHeight: 52, marginTop: 22, borderTopWidth: 1,
-    borderTopColor: C.line, flexDirection: 'row',
-    alignItems: 'center', justifyContent: 'space-between',
+    height: 50,
+    borderRadius: 14,
+    backgroundColor: '#102C50',
+    justifyContent: 'center',
+    alignItems: 'center',
+    marginTop: 14,
   },
-  resultButtonText: { color: C.text, fontSize: 11, fontWeight: '900' },
-  config: {
-    marginTop: 30, borderTopWidth: 1,
-    borderBottomWidth: 1, borderColor: C.line, paddingVertical: 18,
+
+  resultButtonText: {
+    color: '#FFFFFF',
+    fontSize: 11,
+    letterSpacing: 0.8,
+    fontWeight: '900',
   },
-  configTitle: {
-    color: C.text, fontSize: 10, fontWeight: '900',
-    letterSpacing: 1.2, marginBottom: 15,
+
+  disabledButton: {
+    opacity: 0.35,
   },
-  configLabel: {
-    color: C.coral, fontSize: 7, fontWeight: '900',
-    letterSpacing: 1.2, marginTop: 8,
+
+  /* DISCONNECT */
+
+  disconnectButton: {
+    height: 49,
+    borderRadius: 14,
+    borderWidth: 1,
+    borderColor: '#34516F',
+    justifyContent: 'center',
+    alignItems: 'center',
+    marginTop: 5,
   },
-  configValue: { color: C.soft, fontSize: 8, marginTop: 4 },
-  exit: {
-    minHeight: 58, flexDirection: 'row',
-    alignItems: 'center', justifyContent: 'space-between',
+
+  disconnectText: {
+    color: '#91A8C2',
+    fontSize: 11,
+    fontWeight: '800',
   },
-  exitText: { color: C.text, fontSize: 11, fontWeight: '800' },
+
+  footerText: {
+    color: '#496684',
+    textAlign: 'center',
+    fontSize: 9,
+    letterSpacing: 0.5,
+    marginTop: 20,
+  },
 });
